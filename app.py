@@ -6,13 +6,65 @@ import docx
 from PyPDF2 import PdfReader
 from dotenv import load_dotenv
 from llama_index.llms.google_genai import GoogleGenAI
-
-# >>> IMPORTS necessários para o mini-RAG
+import io
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
+from reportlab.lib.units import cm
+import base64
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core import VectorStoreIndex, Document, StorageContext
 from llama_index.core.node_parser import SimpleNodeParser
+from datetime import datetime
+
 
 load_dotenv()
+
+# --- Funções de download ---
+def gerar_download_markdown(documento: str):
+    st.download_button(
+        label="⬇️ Baixar em Markdown",
+        data=documento.encode("utf-8"),
+        file_name="documento.md",
+        mime="text/markdown"
+    )
+
+def gerar_download_pdf(documento: str):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4)
+    styles = getSampleStyleSheet()
+    story = []
+
+    # separa se há diagrama UML
+    plantuml_code = extract_plantuml_code(documento)
+    if plantuml_code:
+        documento_sem_uml = documento.replace(plantuml_code, "[DIAGRAMA_ARQUITETURAL]")
+    else:
+        documento_sem_uml = documento
+
+    for linha in documento_sem_uml.split("\n"):
+        if linha.strip() == "[DIAGRAMA_ARQUITETURAL]":
+            png = plantuml_get_diagram(plantuml_code, "png")
+            if png:
+                img_buffer = io.BytesIO(png)
+                story.append(Image(img_buffer, width=14*cm, height=8*cm))
+                story.append(Spacer(1, 12))
+        else:
+            if linha.strip() == "":
+                story.append(Spacer(1, 12))
+            else:
+                story.append(Paragraph(linha, styles["Normal"]))
+
+    doc.build(story)
+    buffer.seek(0)
+
+    st.download_button(
+        label="⬇️ Baixar em PDF",
+        data=buffer,
+        file_name="documento.pdf",
+        mime="application/pdf"
+    )
+
 
 # =============================
 # Extração de texto de arquivos
@@ -153,62 +205,81 @@ Organize em tópicos claros e numerados, diretamente.
     return safe_complete(prompt, temp=0.25, max_tokens=2000)
 
 
-def generate_technical_doc(text, stacks):
-    prompt = f"""
-Você é um **Arquiteto(a) de Software e Soluções** responsável por elaborar **documentação de arquitetura técnica**.
-Sua missão é transformar o texto abaixo em um documento **padronizado e claro**, que apoie **desenvolvedores, analistas e stakeholders** a compreenderem a solução proposta sob a ótica arquitetural.
+def generate_technical_doc(text, stacks=""):
+    
+    today = datetime.today().strftime("%d/%m/%Y")
 
-Siga o formato abaixo como referência **obrigatória**:
+    prompt_content = f"""
+Você é um **Arquiteto(a) de Software e Soluções** responsável por elaborar **documentação de arquitetura técnica**.  
+Sua missão é transformar o texto abaixo em um documento **padronizado, claro e completo**, que apoie **desenvolvedores, analistas e stakeholders** a compreenderem a solução proposta sob a ótica arquitetural.  
 
-=================== EXEMPLO DE FORMATO ===================
+⚠️ **REGRAS OBRIGATÓRIAS DE FORMATAÇÃO**  
+- O título do documento deve ser exatamente:  
+  ## **Documento de Arquitetura de Software e Soluções – [Nome do Sistema]**  
+- Abaixo do título insira uma linha separadora: ---  
+- Logo depois, insira exatamente estas 3 linhas (sem hyperlinks nem markdown adicional):  
+  Data: {today}  
+  Autor: Arquiteto(a) de Software e Soluções  
+  Versão: 1.0  
+- Sempre insira uma **linha em branco** após cada cabeçalho de seção.  
+- ❌ Nunca escreva conteúdo na mesma linha do cabeçalho.  
+- ❌ Nunca adicione frases extras (ex.: “Com certeza!”, “Aqui está...”) fora da estrutura.  
+- ❌ Nunca altere a ordem ou os títulos das seções.  
+- ✅ O conteúdo deve ser direto, objetivo e técnico.  
 
-**Documento de Arquitetura de Software e Soluções – [Nome do Sistema]**
-Data: [Data Atual]
-Autor: Arquiteto(a) de Software e Soluções
-Versão: 1.0
+---
 
-**1) Objetivo**
-Explique de forma clara o propósito do sistema, seu escopo e a visão arquitetural de alto nível (por ex.: foco em escalabilidade, segurança, performance, integração, observabilidade).
+### 📑 Estrutura obrigatória do documento
 
-**2) Contexto e Requisitos**
-- **Contexto**: Explique o problema/necessidade que o sistema resolve.
-- **Requisitos Funcionais (RF)**: Liste numerada (RF001, RF002, …).
-- **Requisitos Não Funcionais (RNF)**:
-  - Liste numerada (RNF001, RNF002, …).
-  - **Associe explicitamente cada RNF aos componentes relevantes do diagrama** (ex.: ComponentDb, ContainerQueue, API Gateway, Service X). Use a sintaxe: `RNF00X – [Categoria] – Componentes afetados: [ComponenteA, ComponenteB] – Descrição objetiva`.
-  - Cubra, quando aplicável: disponibilidade, recuperação de desastre, escalabilidade, latência, throughput, segurança (authN/authZ, criptografia em trânsito e em repouso), confidencialidade/integridade, resiliência, observabilidade (logs, métricas, tracing), custo, conformidade, suporte/operabilidade.
+**1) Objetivo**  
 
-**3) Arquitetura e Diagrama de Componentes (C4-PlantUML)**
-Inclua um diagrama C4-PlantUML **estritamente** na notação C4, contendo:
-- `Person` (usuários/atores)
-- `System_Boundary` (escopo do sistema)
-- `Component` (módulos internos)
-- `Rel` (relações)
-❌ Não utilize `rectangle`, `note`, `legend` ou sintaxes UML clássicas.
-❗ Para bancos de dados, use **ComponentDb** ou **ComponentDb_Ext**.
-❗ Para filas/mensageria, use **ContainerQueue** ou **ContainerQueue_Ext**.
-Após o diagrama, descreva **cada componente** com: responsabilidades, dependências, dados tratados, e **quais RNFs o impactam** (referencie os IDs RNF00X).
+Descreva de forma clara o propósito do sistema, seu escopo e a visão arquitetural de alto nível.  
 
-**4) Integrações Externas e Contratos em Alto Nível**
-Liste sistemas externos e descreva protocolos, padrões de integração (REST, gRPC, eventos), formatos (JSON, Avro, Protobuf), versionamento, e objetivos.
+**2) Contexto e Requisitos**  
 
-**5) Decisões Arquiteturais Relevantes**
-Registre decisões e trade-offs (por ex.: microsserviços vs. monólito; sync vs. async; banco relacional vs. NoSQL; fila vs. streaming; segurança). Se possível, use formato ADR curto: Contexto → Decisão → Consequências.
+- **Contexto**: Explique o problema/necessidade que o sistema resolve.  
+- **Requisitos Funcionais (RF)**: Liste numerada (RF001, RF002, …).  
+- **Requisitos Não Funcionais (RNF)**:  
+  - Liste numerada (RNF001, RNF002, …).  
+  - Associe explicitamente cada RNF aos componentes relevantes do diagrama usando a sintaxe:  
+    RNF00X – [Categoria] – Componentes afetados: [ComponenteA, ComponenteB] – Descrição objetiva.  
 
-**6) Critérios de Aceite e Próximos Passos**
-- Critérios mínimos de aceite.
-- Próximos passos para evolução da arquitetura e implementação.
+**3) Arquitetura e Diagrama de Componentes (C4-PlantUML)**  
 
-=================== FIM DO EXEMPLO ===================
+Inclua um diagrama C4-PlantUML estritamente na notação C4, contendo apenas:  
+- Person  
+- System_Boundary  
+- Component  
+- Rel  
+- ComponentDb / ComponentDb_Ext  
+- ContainerQueue / ContainerQueue_Ext  
 
-Considere também as preferências de stack:
+Após o diagrama, descreva cada componente: responsabilidades, dependências, dados tratados e quais RNFs o impactam.  
 
-{stacks}
+**4) Integrações Externas e Contratos em Alto Nível**  
 
-=== TEXTO ===
-{text}
+Liste sistemas externos e descreva protocolos, padrões de integração, formatos, versionamento e objetivos.  
+
+**5) Decisões Arquiteturais Relevantes**  
+
+Registre decisões e trade-offs no formato ADR curto:  
+- Contexto → Decisão → Consequências  
+
+**6) Critérios de Aceite e Próximos Passos**  
+
+- Critérios mínimos de aceite.  
+- Próximos passos para evolução da arquitetura e implementação.  
+
+---
+
+📌 **Considere também as preferências de stack**:  
+{stacks}  
+
+📌 **Texto base para análise**:  
+{text}  
 """
-    return safe_complete(prompt, temp=0.25, max_tokens=4000)
+    return safe_complete(prompt_content, temp=0.25, max_tokens=4000)
+
 
 # =============================
 # Orquestrador simplificado (só progressbar)
@@ -313,3 +384,10 @@ if "documento" in st.session_state:
             st.components.v1.html(svg_content, height=520, scrolling=True)
     else:
         st.info("Nenhum diagrama detectado no documento.")
+
+    st.divider()
+    st.markdown("### 💾 Exportar Documento")
+    gerar_download_markdown(st.session_state["documento"])
+    gerar_download_pdf(st.session_state["documento"])
+
+
