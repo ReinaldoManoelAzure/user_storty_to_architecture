@@ -1,0 +1,12 @@
+version: "3.9"
+
+services:
+  arquitetura-app:
+    build: .
+    container_name: arquitetura_app
+    ports:
+      - "5002:8501"
+    environment:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+    volumes:
+      - .:/app

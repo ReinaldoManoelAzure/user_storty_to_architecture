@@ -1,0 +1,8 @@
+streamlit==1.36.0
+ffmpeg-python==0.2.0
+openai-whisper==20231117
+requests==2.31.0
+python-dotenv==1.0.1
+llama-index==0.10.40
+llama-index-llms-google-genai==0.1.3
+google-generativeai==0.5.4
