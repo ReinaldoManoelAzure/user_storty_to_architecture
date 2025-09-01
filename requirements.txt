@@ -4,6 +4,7 @@ PyPDF2
 python-dotenv
 llama-index
 llama-index-llms-google-genai
+llama-index-embeddings-huggingface
 requests
 reportlab
 cairosvg
