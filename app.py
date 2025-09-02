@@ -7,16 +7,13 @@ from PyPDF2 import PdfReader
 from dotenv import load_dotenv
 from llama_index.llms.google_genai import GoogleGenAI
 import io
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
-from reportlab.lib.units import cm
 import base64
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core import VectorStoreIndex, Document, StorageContext
 from llama_index.core.node_parser import SimpleNodeParser
 from datetime import datetime
-
+from markdown_pdf import MarkdownPdf, Section  # <<< novo import
+import tempfile
 
 load_dotenv()
 
@@ -30,40 +27,43 @@ def gerar_download_markdown(documento: str):
     )
 
 def gerar_download_pdf(documento: str):
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4)
-    styles = getSampleStyleSheet()
-    story = []
-
-    # separa se há diagrama UML
     plantuml_code = extract_plantuml_code(documento)
     if plantuml_code:
-        documento_sem_uml = documento.replace(plantuml_code, "[DIAGRAMA_ARQUITETURAL]")
-    else:
-        documento_sem_uml = documento
+        # Gera PNG temporário
+        png = plantuml_get_diagram(plantuml_code, "png")
+        if png:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
+                tmp_img.write(png)
+                tmp_img_path = tmp_img.name
 
-    for linha in documento_sem_uml.split("\n"):
-        if linha.strip() == "[DIAGRAMA_ARQUITETURAL]":
-            png = plantuml_get_diagram(plantuml_code, "png")
-            if png:
-                img_buffer = io.BytesIO(png)
-                story.append(Image(img_buffer, width=14*cm, height=8*cm))
-                story.append(Spacer(1, 12))
-        else:
-            if linha.strip() == "":
-                story.append(Spacer(1, 12))
-            else:
-                story.append(Paragraph(linha, styles["Normal"]))
+            # Substitui o código UML por sintaxe Markdown de imagem
+            img_tag = f'![]({tmp_img_path})'
+            documento = documento.replace(plantuml_code, img_tag)
 
-    doc.build(story)
-    buffer.seek(0)
+    pdf = MarkdownPdf(optimize=True)
+    pdf.add_section(Section(documento, toc=False))
+
+    out = io.BytesIO()
+    try:
+        pdf.save_bytes(out)
+        pdf_bytes = out.getvalue()
+    except Exception:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_path = tmp_file.name
+        pdf.save(tmp_path)
+        with open(tmp_path, "rb") as f:
+            pdf_bytes = f.read()
+        os.remove(tmp_path)
 
     st.download_button(
         label="⬇️ Baixar em PDF",
-        data=buffer,
+        data=pdf_bytes,
         file_name="documento.pdf",
-        mime="application/pdf"
+        mime="application/pdf",
     )
+
+
+
 
 
 # =============================
@@ -128,15 +128,21 @@ def extract_plantuml_code(text: str) -> str | None:
     return match.group(0).strip() if match else None
 
 def plantuml_get_diagram(plantuml_code, fmt="svg"):
-    server_url = f"http://www.plantuml.com/plantuml/{fmt}/"
+    server_url = f"https://www.plantuml.com/plantuml/{fmt}/"
     encoded = encode_plantuml(plantuml_code)
     url = server_url + encoded
-    response = requests.get(url)
-    if response.status_code == 200:
-        return response.content if fmt == "png" else response.text
-    else:
-        st.warning(f"Não foi possível gerar o diagrama PlantUML em {fmt}.")
+
+    try:
+        response = requests.get(url, timeout=15)
+        if response.status_code == 200:
+            return response.content if fmt in ["png", "svg"] else response.text
+        else:
+            st.warning(f"⚠️ Erro {response.status_code} ao gerar o diagrama PlantUML em {fmt}.")
+            return None
+    except Exception as e:
+        st.warning(f"❌ Erro ao acessar servidor PlantUML: {e}")
         return None
+
 
 # =============================
 # LLM - Gemini
@@ -205,13 +211,24 @@ Organize em tópicos claros e numerados, diretamente.
     return safe_complete(prompt, temp=0.25, max_tokens=2000)
 
 
-def generate_technical_doc(text, stacks=""):
+def generate_technical_doc(text, requisitos="", stacks=""):
     
     today = datetime.today().strftime("%d/%m/%Y")
 
     prompt_content = f"""
 Você é um **Arquiteto(a) de Software e Soluções** responsável por elaborar **documentação de arquitetura técnica**.  
-Sua missão é transformar o texto abaixo em um documento **padronizado, claro e completo**, que apoie **desenvolvedores, analistas e stakeholders** a compreenderem a solução proposta sob a ótica arquitetural.  
+Sua missão é transformar os insumos abaixo em um documento **padronizado, claro e completo**, que apoie **desenvolvedores, analistas e stakeholders** a compreenderem a solução proposta sob a ótica arquitetural.  
+
+---
+
+### 📎 Insumos
+**Requisitos e Regras de Negócio (gerados previamente):**  
+{requisitos}
+
+**Texto base adicional para análise:**  
+{text}
+
+---
 
 ⚠️ **REGRAS OBRIGATÓRIAS DE FORMATAÇÃO**  
 - O título do documento deve ser exatamente:  
@@ -238,11 +255,16 @@ Descreva de forma clara o propósito do sistema, seu escopo e a visão arquitetu
 **2) Contexto e Requisitos**  
 
 - **Contexto**: Explique o problema/necessidade que o sistema resolve.  
-- **Requisitos Funcionais (RF)**: Liste numerada (RF001, RF002, …).  
+- **Requisitos Funcionais (RF)**:  
+  - Use prioritariamente a lista fornecida em *Requisitos e Regras de Negócio (gerados previamente)* consolidando apenas duplicidades óbvias.  
+  - Liste numerada (RF001, RF002, …).  
 - **Requisitos Não Funcionais (RNF)**:  
+  - Use prioritariamente a lista fornecida em *Requisitos e Regras de Negócio (gerados previamente)*; se estiver vazia ou incompleta, derive do texto base.  
   - Liste numerada (RNF001, RNF002, …).  
   - Associe explicitamente cada RNF aos componentes relevantes do diagrama usando a sintaxe:  
     RNF00X – [Categoria] – Componentes afetados: [ComponenteA, ComponenteB] – Descrição objetiva.  
+- **Regras de Negócio (RN)**:  
+  - Reflita fielmente as regras fornecidas, ajustando apenas a redação para clareza. Numere (RN001, RN002, …).  
 
 **3) Arquitetura e Diagrama de Componentes (C4-PlantUML)**  
 
@@ -273,13 +295,9 @@ Registre decisões e trade-offs no formato ADR curto:
 ---
 
 📌 **Considere também as preferências de stack**:  
-{stacks}  
-
-📌 **Texto base para análise**:  
-{text}  
+{stacks}
 """
     return safe_complete(prompt_content, temp=0.25, max_tokens=4000)
-
 
 # =============================
 # Orquestrador simplificado (só progressbar)
@@ -298,7 +316,8 @@ def generate_full_doc(text, stacks=""):
 
         requisitos_doc = "\n".join(requisitos)
 
-        tecnico_doc = generate_technical_doc("\n".join(partes), stacks)
+        # 🔹 Agora o técnico recebe também os requisitos_doc
+        tecnico_doc = generate_technical_doc("\n".join(partes), requisitos_doc, stacks)
         progress.progress((len(partes) + 1) / (len(partes) + 2))
 
         progress.progress(1.0)
@@ -320,12 +339,14 @@ def generate_full_doc(text, stacks=""):
         requisitos_doc = generate_requisitos_doc(requisitos_context)
         progress.progress(0.75)
 
-        tecnico_doc = generate_technical_doc(tecnico_context, stacks)
+        # 🔹 Também passa os requisitos no modo RAG
+        tecnico_doc = generate_technical_doc(tecnico_context, requisitos_doc, stacks)
         progress.progress(0.95)
 
         progress.progress(1.0)
 
         return f"## Requisitos e Regras de Negócio\n\n{requisitos_doc}\n\n{tecnico_doc}"
+
 
 # =============================
 # App Streamlit (UI)
@@ -389,5 +410,3 @@ if "documento" in st.session_state:
     st.markdown("### 💾 Exportar Documento")
     gerar_download_markdown(st.session_state["documento"])
     gerar_download_pdf(st.session_state["documento"])
-
-
